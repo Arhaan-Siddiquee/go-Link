@@ -2,12 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-
-	"golang.org/x/net/html"
 )
 
 func main() {
@@ -61,58 +60,72 @@ func fetchLinks(url string) ([]string, error) {
 		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
 	}
 
-	doc, err := html.Parse(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	var links []string
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					links = append(links, attr.Val)
-				}
-			}
+	bodyStr := string(body)
+	start := 0
+
+	for {
+		aStart := strings.Index(bodyStr[start:], "<a ")
+		if aStart == -1 {
+			break
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
+		aStart += start
+
+		hrefStart := strings.Index(bodyStr[aStart:], "href=\"")
+		if hrefStart == -1 {
+			start = aStart + 1
+			continue
 		}
+		hrefStart += aStart + 6
+
+		hrefEnd := strings.Index(bodyStr[hrefStart:], "\"")
+		if hrefEnd == -1 {
+			start = hrefStart + 1
+			continue
+		}
+		hrefEnd += hrefStart
+
+		link := bodyStr[hrefStart:hrefEnd]
+		if link != "" {
+			links = append(links, link)
+		}
+
+		start = hrefEnd + 1
 	}
-	f(doc)
 
 	return links, nil
 }
 
 func checkLink(link, baseURL string) (int, error) {
-	// Skip mailto: and other non-http links
-	if strings.HasPrefix(link, "#") || strings.HasPrefix(link, "mailto:") || strings.HasPrefix(link, "tel:") {
+	if strings.HasPrefix(link, "#") || 
+	   strings.HasPrefix(link, "mailto:") || 
+	   strings.HasPrefix(link, "tel:") ||
+	   strings.HasPrefix(link, "javascript:") {
 		return http.StatusOK, nil
 	}
 
-	// Handle relative URLs
-	if strings.HasPrefix(link, "/") {
-		parsedBase, err := url.Parse(baseURL)
-		if err != nil {
-			return 0, err
-		}
-	link = parsedBase.Scheme + "://" + parsedBase.Host + link
-	} else if !strings.HasPrefix(link, "http") {
-		// Handle relative paths without leading slash
-		parsedBase, err := url.Parse(baseURL)
-		if err != nil {
-			return 0, err
-		}
-		link = parsedBase.Scheme + "://" + parsedBase.Host + "/" + link
+	u, err := url.Parse(link)
+	if err != nil {
+		return 0, err
 	}
 
-	// Skip checking the same base URL to avoid infinite recursion
-	if link == baseURL {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return 0, err
+	}
+
+	absURL := base.ResolveReference(u).String()
+
+	if absURL == baseURL {
 		return http.StatusOK, nil
 	}
 
-	resp, err := http.Head(link) // Using HEAD to be more efficient than GET
+	resp, err := http.Head(absURL)
 	if err != nil {
 		return 0, err
 	}
